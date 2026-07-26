@@ -128,6 +128,13 @@ async function verifyMerge(ownerRepo, notification, reviewerLogin) {
   return pr;
 }
 
+async function mergePullRequest(ownerRepo, pr) {
+  return ghJson([
+    "api", "--method", "PUT", `repos/${ownerRepo}/pulls/${pr.number}/merge`,
+    "-f", "merge_method=squash", "-f", `sha=${pr.headRefOid}`,
+  ]);
+}
+
 function linkedIssue(body) {
   return body?.match(/\bCloses\s+([A-Z][A-Z0-9]+-\d+)\b/i)?.[1]?.toUpperCase();
 }
@@ -186,55 +193,114 @@ async function postReadyNotifications(client, channel, ownerRepo, state, reviewe
   }
 }
 
+async function completePostMergeFollowUps(client, state, notification, dependencies = {}) {
+  const findNextIssue = dependencies.nextBlockedIssue ?? nextBlockedIssue;
+  const persist = dependencies.saveState ?? saveState;
+  try {
+    if (!notification.confirmationSent) {
+      await client.chat.postMessage({
+        channel: notification.channel,
+        thread_ts: notification.ts,
+        text: `✅ PR #${notification.pr} was squash-merged at ${notification.mergeSha.slice(0, 12)}.`,
+      });
+      notification.confirmationSent = true;
+      persist(state);
+    }
+
+    if (!Object.hasOwn(notification, "nextIssue")) {
+      const next = await findNextIssue(notification.issue);
+      notification.nextIssue = next
+        ? { identifier: next.identifier, title: next.title }
+        : null;
+      persist(state);
+    }
+
+    if (notification.nextIssue && !notification.approvalNotificationKey) {
+      const next = notification.nextIssue;
+      const posted = await client.chat.postMessage({
+        channel: notification.channel,
+        thread_ts: notification.ts,
+        text: `Next issue: ${next.identifier} — ${next.title}\nReact with ✅ to apply agent-ready after reviewing it in Linear.`,
+      });
+      const key = `approve:${next.identifier}:${posted.ts}`;
+      state.notifications[key] = {
+        kind: "approve", status: "ready", issue: next.identifier,
+        channel: notification.channel, ts: posted.ts, parentTs: notification.ts,
+      };
+      notification.approvalNotificationKey = key;
+      persist(state);
+    }
+
+    notification.followUpStatus = "complete";
+    delete notification.followUpError;
+    persist(state);
+    return true;
+  } catch (error) {
+    notification.followUpStatus = "pending";
+    notification.followUpError = error.message;
+    try {
+      persist(state);
+    } catch (persistError) {
+      console.error("Could not persist post-merge retry state:", persistError.message);
+    }
+    return false;
+  }
+}
+
+export async function retryPostMergeFollowUps(client, state, dependencies = {}) {
+  for (const notification of Object.values(state.notifications)) {
+    if (notification.kind !== "merge" || notification.status !== "merged" ||
+        notification.followUpStatus !== "pending") continue;
+    await completePostMergeFollowUps(client, state, notification, dependencies);
+  }
+}
+
 function findNotification(state, event, kind) {
   return Object.values(state.notifications).find((item) =>
     item.kind === kind && item.status === "ready" &&
     item.channel === event.item.channel && item.ts === event.item.ts);
 }
 
-async function handleMergeReaction({ client, event, ownerRepo, state, reviewerLogin }) {
+export async function handleMergeReaction({
+  client, event, ownerRepo, state, reviewerLogin, dependencies = {},
+}) {
+  const verify = dependencies.verifyMerge ?? verifyMerge;
+  const merge = dependencies.mergePullRequest ?? mergePullRequest;
+  const persist = dependencies.saveState ?? saveState;
   const notification = findNotification(state, event, "merge");
   if (!notification) return;
   notification.status = "processing";
-  saveState(state);
+  persist(state);
+  let pr;
+  let result;
   try {
-    const pr = await verifyMerge(ownerRepo, notification, reviewerLogin);
-    const result = await ghJson([
-      "api", "--method", "PUT", `repos/${ownerRepo}/pulls/${pr.number}/merge`,
-      "-f", "merge_method=squash", "-f", `sha=${pr.headRefOid}`,
-    ]);
+    pr = await verify(ownerRepo, notification, reviewerLogin);
+    result = await merge(ownerRepo, pr);
     if (!result.merged) throw new Error(result.message ?? "GitHub did not merge the PR");
-    notification.status = "merged";
-    notification.mergeSha = result.sha;
-    saveState(state);
-    await client.chat.postMessage({
-      channel: notification.channel,
-      thread_ts: notification.ts,
-      text: `✅ PR #${pr.number} was squash-merged at ${result.sha.slice(0, 12)}.`,
-    });
-    const next = await nextBlockedIssue(linkedIssue(pr.body));
-    if (next) {
-      const posted = await client.chat.postMessage({
-        channel: notification.channel,
-        thread_ts: notification.ts,
-        text: `Next issue: ${next.identifier} — ${next.title}\nReact with ✅ to apply agent-ready after reviewing it in Linear.`,
-      });
-      state.notifications[`approve:${next.identifier}:${posted.ts}`] = {
-        kind: "approve", status: "ready", issue: next.identifier,
-        channel: notification.channel, ts: posted.ts, parentTs: notification.ts,
-      };
-      saveState(state);
-    }
   } catch (error) {
     notification.status = "ready";
     notification.lastError = error.message;
-    saveState(state);
+    persist(state);
     await client.chat.postMessage({
       channel: notification.channel,
       thread_ts: notification.ts,
       text: `⛔ Merge rejected: ${error.message}`,
     });
+    return;
   }
+
+  notification.status = "merged";
+  notification.mergeSha = result.sha;
+  notification.issue = linkedIssue(pr.body);
+  notification.followUpStatus = "pending";
+  delete notification.lastError;
+  try {
+    persist(state);
+  } catch (error) {
+    notification.followUpError = error.message;
+    console.error("Could not persist successful merge state:", error.message);
+  }
+  await completePostMergeFollowUps(client, state, notification, dependencies);
 }
 
 async function handleApproveReaction({ client, event, state }) {
@@ -350,11 +416,13 @@ export async function start() {
   await app.start();
   console.log(`Finn Slack worker connected for ${ownerRepo} in channel ${channel}`);
   await postReadyNotifications(app.client, channel, ownerRepo, state, reviewerLogin);
+  await retryPostMergeFollowUps(app.client, state);
   await pollAuthorizedReactions(
     app.client, ownerRepo, state, approver, channel, reviewerLogin,
   );
   setInterval(() => {
     postReadyNotifications(app.client, channel, ownerRepo, state, reviewerLogin)
+      .then(() => retryPostMergeFollowUps(app.client, state))
       .then(() => pollAuthorizedReactions(
         app.client, ownerRepo, state, approver, channel, reviewerLogin,
       ))
