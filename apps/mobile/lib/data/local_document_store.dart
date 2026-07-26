@@ -41,9 +41,19 @@ final class LocalDocumentStore {
 
   Future<void> deleteDocument(String documentId) async {
     final pages = await _database.pagesForDocument(documentId);
-    await _database.deleteDocument(documentId);
+    Object? firstFailure;
+    StackTrace? firstFailureStackTrace;
     for (final page in pages) {
-      await _fileStore.delete(page.encryptedFileName);
+      try {
+        await _fileStore.delete(page.encryptedFileName);
+      } catch (error, stackTrace) {
+        firstFailure ??= error;
+        firstFailureStackTrace ??= stackTrace;
+      }
     }
+    if (firstFailure != null) {
+      Error.throwWithStackTrace(firstFailure, firstFailureStackTrace!);
+    }
+    await _database.deleteDocument(documentId);
   }
 }

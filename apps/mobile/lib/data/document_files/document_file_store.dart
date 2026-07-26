@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -32,12 +33,18 @@ final class DocumentFileStore {
     required this._keyManager,
     AuthenticatedFileCipher? cipher,
     this._backupExclusion = const PlatformBackupExclusion(),
-  }) : _cipher = cipher ?? AesGcmFileCipher();
+    Future<void> Function(File file)? deleteFile,
+    Random? random,
+  }) : _cipher = cipher ?? AesGcmFileCipher(),
+       _deleteFile = deleteFile ?? _deleteStoredFile,
+       _random = random ?? Random.secure();
 
   final Directory _rootDirectory;
   final InstallationKeyManager _keyManager;
   final AuthenticatedFileCipher _cipher;
   final BackupExclusion _backupExclusion;
+  final Future<void> Function(File file) _deleteFile;
+  final Random _random;
 
   Future<String> storeFromPlaintextFile(
     File plaintextFile, {
@@ -58,14 +65,11 @@ final class DocumentFileStore {
 
       await _ensureRoot();
       final safePageId = _safeFileComponent(pageId);
-      final target = File(p.join(_rootDirectory.path, '$safePageId.pwa'));
+      final target = await _allocateTarget(safePageId);
       workFile = File('${target.path}.work');
       await workFile.writeAsBytes(encrypted, flush: true);
       token.throwIfCancelled();
 
-      if (await target.exists()) {
-        await target.delete();
-      }
       await workFile.rename(target.path);
       workFile = null;
       await _backupExclusion.protect(target.path);
@@ -90,7 +94,7 @@ final class DocumentFileStore {
   Future<void> delete(String encryptedFileName) async {
     final file = _resolve(encryptedFileName);
     if (await file.exists()) {
-      await file.delete();
+      await _deleteFile(file);
     }
   }
 
@@ -99,6 +103,23 @@ final class DocumentFileStore {
   Future<void> _ensureRoot() async {
     await _rootDirectory.create(recursive: true);
     await _backupExclusion.protect(_rootDirectory.path);
+  }
+
+  Future<File> _allocateTarget(String safePageId) async {
+    for (var attempt = 0; attempt < 10; attempt++) {
+      final suffix = List.generate(
+        16,
+        (_) => _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+      ).join();
+      final target = File(
+        p.join(_rootDirectory.path, '$safePageId-$suffix.pwa'),
+      );
+      if (!await target.exists() &&
+          !await File('${target.path}.work').exists()) {
+        return target;
+      }
+    }
+    throw StateError('Could not allocate encrypted storage for $safePageId.');
   }
 
   File _resolve(String encryptedFileName) {
@@ -124,3 +145,5 @@ final class DocumentFileStore {
     return value;
   }
 }
+
+Future<void> _deleteStoredFile(File file) => file.delete();
