@@ -1,0 +1,4 @@
+interface:
+  display_name: "Finn Build"
+  short_description: "Build one approved Linear issue into a PR"
+  default_prompt: "Use $finn-build to claim and implement one approved Linear issue."

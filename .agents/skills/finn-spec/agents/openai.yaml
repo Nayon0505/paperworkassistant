@@ -1,0 +1,4 @@
+interface:
+  display_name: "Finn Spec"
+  short_description: "Turn an idea into an approved Linear contract"
+  default_prompt: "Use $finn-spec to turn my idea into a build-ready Linear issue."

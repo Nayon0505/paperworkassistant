@@ -1,0 +1,4 @@
+interface:
+  display_name: "Finn Review"
+  short_description: "Review one Finn pull request safely"
+  default_prompt: "Use $finn-review to review the next Finn-loop pull request."
