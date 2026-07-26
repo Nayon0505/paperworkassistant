@@ -56,18 +56,40 @@ async function repository() {
   return (await ghJson(["repo", "view", "--json", "nameWithOwner"])).nameWithOwner;
 }
 
-async function latestReview(ownerRepo, number) {
+const trustedReviewerAssociations = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+function approvedReviewFromComment(comment, reviewerLogin) {
+  if (!reviewerLogin ||
+      comment.user?.login?.toLowerCase() !== reviewerLogin.toLowerCase() ||
+      !trustedReviewerAssociations.has(comment.author_association)) return null;
+  const [firstLine] = (comment.body ?? "").split(/\r?\n/, 1);
+  const match = firstLine.match(/^Finn-loop review of ([0-9a-f]{40})$/i);
+  const approved = /^## 3\. Safe to merge[ \t]*\r?$(?:\r?\n)+[ \t]*Yes\b/im
+    .test(comment.body ?? "");
+  return match && approved ? { sha: match[1], url: comment.html_url } : null;
+}
+
+export function findLatestApprovedReview(comments, reviewerLogin) {
+  return [...comments].reverse()
+    .map((comment) => approvedReviewFromComment(comment, reviewerLogin))
+    .find(Boolean);
+}
+
+async function latestReview(ownerRepo, number, reviewerLogin) {
   const comments = await ghJson([
     "api", `repos/${ownerRepo}/issues/${number}/comments`, "--paginate",
   ]);
-  return [...comments].reverse().map((comment) => {
-    const match = comment.body?.match(/^Finn-loop review of ([0-9a-f]{7,40})\b/i);
-    return match ? { sha: match[1], url: comment.html_url } : null;
-  }).find(Boolean);
+  return findLatestApprovedReview(comments, reviewerLogin);
 }
 
 function labelsOf(pr) {
   return new Set((pr.labels ?? []).map((label) => label.name));
+}
+
+export function hasApprovedReviewForHead(pr, review) {
+  const labels = labelsOf(pr);
+  return labels.has("loop-approved") && !labels.has("needs-human-review") &&
+    review?.sha === pr.headRefOid;
 }
 
 async function requiredChecks(number) {
@@ -81,7 +103,7 @@ async function requiredChecks(number) {
   }
 }
 
-async function verifyMerge(ownerRepo, notification) {
+async function verifyMerge(ownerRepo, notification, reviewerLogin) {
   const pr = await ghJson([
     "pr", "view", String(notification.pr),
     "--json", "number,title,url,state,headRefOid,mergeable,mergeStateStatus,labels,body",
@@ -92,8 +114,10 @@ async function verifyMerge(ownerRepo, notification) {
   if (!labels.has("loop-approved")) throw new Error("loop-approved is missing");
   if (labels.has("needs-human-review")) throw new Error("needs-human-review blocks Slack merge");
   if (pr.mergeable !== "MERGEABLE") throw new Error(`PR is not mergeable (${pr.mergeable})`);
-  const review = await latestReview(ownerRepo, pr.number);
-  if (!review || review.sha !== pr.headRefOid) throw new Error("Latest Finn review does not match PR head");
+  const review = await latestReview(ownerRepo, pr.number, reviewerLogin);
+  if (!hasApprovedReviewForHead(pr, review)) {
+    throw new Error("Trusted approved Finn review does not match PR head");
+  }
   const checks = await requiredChecks(pr.number);
   if (!checks?.length) throw new Error("No required checks are configured");
   const failing = checks.filter((check) => check.bucket !== "pass");
@@ -135,15 +159,15 @@ function blocksForReady(pr, review) {
   ];
 }
 
-async function postReadyNotifications(client, channel, ownerRepo, state) {
+async function postReadyNotifications(client, channel, ownerRepo, state, reviewerLogin) {
   const prs = await ghJson([
     "pr", "list", "--state", "open", "--label", "loop-approved",
     "--json", "number,title,url,headRefOid,labels",
   ]);
   for (const pr of prs) {
     if (labelsOf(pr).has("needs-human-review")) continue;
-    const review = await latestReview(ownerRepo, pr.number);
-    if (!review || review.sha !== pr.headRefOid) continue;
+    const review = await latestReview(ownerRepo, pr.number, reviewerLogin);
+    if (!hasApprovedReviewForHead(pr, review)) continue;
     const key = `merge:${pr.number}:${pr.headRefOid}`;
     if (state.notifications[key]) continue;
     const posted = await client.chat.postMessage({
@@ -165,13 +189,13 @@ function findNotification(state, event, kind) {
     item.channel === event.item.channel && item.ts === event.item.ts);
 }
 
-async function handleMergeReaction({ client, event, ownerRepo, state }) {
+async function handleMergeReaction({ client, event, ownerRepo, state, reviewerLogin }) {
   const notification = findNotification(state, event, "merge");
   if (!notification) return;
   notification.status = "processing";
   saveState(state);
   try {
-    const pr = await verifyMerge(ownerRepo, notification);
+    const pr = await verifyMerge(ownerRepo, notification, reviewerLogin);
     const result = await ghJson([
       "api", "--method", "PUT", `repos/${ownerRepo}/pulls/${pr.number}/merge`,
       "-f", "merge_method=squash", "-f", `sha=${pr.headRefOid}`,
@@ -239,7 +263,9 @@ async function handleApproveReaction({ client, event, state }) {
   }
 }
 
-async function processReaction({ client, event, ownerRepo, state, approver, channel }) {
+async function processReaction({
+  client, event, ownerRepo, state, approver, channel, reviewerLogin,
+}) {
   if (event.user !== approver || event.item.type !== "message" ||
       event.item.channel !== channel || event.user === event.item_user) return;
   const eventKey = `${event.event_ts}:${event.user}:${event.reaction}`;
@@ -248,13 +274,15 @@ async function processReaction({ client, event, ownerRepo, state, approver, chan
   state.handledEvents = state.handledEvents.slice(-500);
   saveState(state);
   if (event.reaction === "rocket") {
-    await handleMergeReaction({ client, event, ownerRepo, state });
+    await handleMergeReaction({ client, event, ownerRepo, state, reviewerLogin });
   } else if (event.reaction === "white_check_mark") {
     await handleApproveReaction({ client, event, state });
   }
 }
 
-async function pollAuthorizedReactions(client, ownerRepo, state, approver, channel) {
+async function pollAuthorizedReactions(
+  client, ownerRepo, state, approver, channel, reviewerLogin,
+) {
   for (const notification of Object.values(state.notifications)) {
     if (notification.status !== "ready") continue;
     const expected = notification.kind === "merge" ? "rocket" : "white_check_mark";
@@ -279,6 +307,7 @@ async function pollAuthorizedReactions(client, ownerRepo, state, approver, chann
       state,
       approver,
       channel,
+      reviewerLogin,
     });
   }
 }
@@ -287,7 +316,7 @@ export async function start() {
   loadEnv();
   const required = [
     "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_APPROVER_USER_ID",
-    "SLACK_MERGE_CHANNEL_ID",
+    "SLACK_MERGE_CHANNEL_ID", "FINN_REVIEWER_GITHUB_LOGIN",
   ];
   for (const name of required) if (!process.env[name]) throw new Error(`${name} is missing`);
   if (process.env.SLACK_MERGE_ENABLED !== "true") {
@@ -307,25 +336,35 @@ export async function start() {
   const ownerRepo = await repository();
   const approver = process.env.SLACK_APPROVER_USER_ID;
   const channel = process.env.SLACK_MERGE_CHANNEL_ID;
+  const reviewerLogin = process.env.FINN_REVIEWER_GITHUB_LOGIN;
 
   app.event("reaction_added", async ({ event, client }) => {
-    await processReaction({ client, event, ownerRepo, state, approver, channel });
+    await processReaction({
+      client, event, ownerRepo, state, approver, channel, reviewerLogin,
+    });
   });
 
   await app.start();
   console.log(`Finn Slack worker connected for ${ownerRepo} in channel ${channel}`);
-  await postReadyNotifications(app.client, channel, ownerRepo, state);
-  await pollAuthorizedReactions(app.client, ownerRepo, state, approver, channel);
+  await postReadyNotifications(app.client, channel, ownerRepo, state, reviewerLogin);
+  await pollAuthorizedReactions(
+    app.client, ownerRepo, state, approver, channel, reviewerLogin,
+  );
   setInterval(() => {
-    postReadyNotifications(app.client, channel, ownerRepo, state)
-      .then(() => pollAuthorizedReactions(app.client, ownerRepo, state, approver, channel))
+    postReadyNotifications(app.client, channel, ownerRepo, state, reviewerLogin)
+      .then(() => pollAuthorizedReactions(
+        app.client, ownerRepo, state, approver, channel, reviewerLogin,
+      ))
       .catch((error) => console.error("Slack poll failed:", error.message));
   }, 60_000);
 }
 
 export async function check() {
   loadEnv();
-  for (const name of ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_APPROVER_USER_ID", "SLACK_MERGE_CHANNEL_ID"]) {
+  for (const name of [
+    "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_APPROVER_USER_ID",
+    "SLACK_MERGE_CHANNEL_ID", "FINN_REVIEWER_GITHUB_LOGIN",
+  ]) {
     if (!process.env[name]) throw new Error(`${name} is missing`);
   }
   const { WebClient } = await import("@slack/web-api");

@@ -2,6 +2,9 @@
   "name": "finn-loop-runtime",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test slack-worker.test.mjs"
+  },
   "dependencies": {
     "@slack/bolt": "4.4.0"
   }
