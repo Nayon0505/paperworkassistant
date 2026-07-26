@@ -15,7 +15,8 @@ imports, AI integration, or production deployment.
 ## Prerequisites
 
 - Flutter 3.44 or newer with the Android and/or iOS platform toolchain.
-- Node.js 22 or newer and npm 11 or newer.
+- Node.js 22.13 or newer in the 22.x line, or Node.js 24 or newer, and npm
+  11 or newer.
 - Docker, when running the API in a container.
 
 ## Install

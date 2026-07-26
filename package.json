@@ -7,7 +7,7 @@
     "packages/contracts"
   ],
   "engines": {
-    "node": ">=22"
+    "node": "^22.13.0 || >=24"
   },
   "scripts": {
     "api:dev": "npm run build --workspace @paperwork-assistant/contracts && npm run dev --workspace @paperwork-assistant/api",
