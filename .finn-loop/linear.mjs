@@ -40,7 +40,14 @@ const issueFields = `
   labels { nodes { id name } }
   comments { nodes { id body createdAt user { name } } }
   relations { nodes { id type relatedIssue { id identifier title state { type name } } } }
+  inverseRelations { nodes { id type issue { id identifier title state { type name } } } }
 `;
+
+function unresolvedBlockers(item) {
+  return (item.inverseRelations?.nodes ?? []).filter((relation) =>
+    relation.type === "blocks" &&
+    !["completed", "canceled"].includes(relation.issue?.state?.type));
+}
 
 async function team() {
   const data = await gql(
@@ -101,6 +108,7 @@ if (command === "viewer") {
     .filter((item) => !item.assignee)
     .filter((item) => item.labels.nodes.some((label) => label.name === ready))
     .filter((item) => !item.labels.nodes.some((label) => label.name === blocked))
+    .filter((item) => unresolvedBlockers(item).length === 0)
     .sort((a, b) => (a.priority || 99) - (b.priority || 99) ||
       a.createdAt.localeCompare(b.createdAt));
 } else if (command === "issue") {
@@ -141,6 +149,19 @@ if (command === "viewer") {
 } else if (command === "claim") {
   const currentIssue = await issue(process.argv[3]);
   const current = await team();
+  const ready = config.labels?.ready ?? "agent-ready";
+  const blocked = config.labels?.blocked ?? "blocked";
+  if (currentIssue.assignee) throw new Error(`${currentIssue.identifier} is already assigned`);
+  if (!currentIssue.labels.nodes.some((label) => label.name === ready)) {
+    throw new Error(`${currentIssue.identifier} is not agent-ready`);
+  }
+  if (currentIssue.labels.nodes.some((label) => label.name === blocked)) {
+    throw new Error(`${currentIssue.identifier} has the blocked label`);
+  }
+  const blockers = unresolvedBlockers(currentIssue);
+  if (blockers.length) {
+    throw new Error(`${currentIssue.identifier} is blocked by ${blockers.map((item) => item.issue.identifier).join(", ")}`);
+  }
   const viewer = (await gql(`query { viewer { id name } }`)).viewer;
   const preferred = config.startedState?.toLowerCase();
   const state = current.states.nodes.find((item) => item.name.toLowerCase() === preferred) ??
@@ -168,8 +189,20 @@ if (command === "viewer") {
     }`,
     { id: currentIssue.id, input: { assigneeId: null, labelIds: [...new Set([...existing, blockedId])] } },
   )).issueUpdate;
+} else if (command === "add-label") {
+  const currentIssue = await issue(process.argv[3]);
+  const requestedLabel = process.argv[4];
+  if (!requestedLabel) throw new Error("Label name is required");
+  const requestedId = await labelId(requestedLabel);
+  const existing = currentIssue.labels.nodes.map((item) => item.id);
+  result = (await gql(
+    `mutation($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) { success issue { ${issueFields} } }
+    }`,
+    { id: currentIssue.id, input: { labelIds: [...new Set([...existing, requestedId])] } },
+  )).issueUpdate;
 } else {
-  throw new Error("Commands: viewer, ready, issue, create-issue, claim, comment, move, block");
+  throw new Error("Commands: viewer, ready, issue, create-issue, claim, comment, move, block, add-label");
 }
 
 console.log(JSON.stringify(result, null, 2));
