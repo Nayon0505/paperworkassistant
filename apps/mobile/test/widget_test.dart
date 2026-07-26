@@ -36,4 +36,15 @@ void main() {
     expect(find.text('Your inbox is empty'), findsOneWidget);
     expect(find.text('Dein Posteingang ist leer'), findsNothing);
   });
+
+  testWidgets('shows a safe error when local persistence cannot start', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const PaperworkAssistantStartupErrorApp());
+
+    expect(
+      find.text('Local data could not be loaded. Please restart the app.'),
+      findsOneWidget,
+    );
+  });
 }

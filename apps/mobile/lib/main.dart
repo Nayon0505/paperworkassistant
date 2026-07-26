@@ -1,41 +1,114 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
-void main() {
-  runApp(const PaperworkAssistantApp());
+import 'app_persistence.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  try {
+    final persistence = await AppPersistence.initialize();
+    runApp(PaperworkAssistantApp(persistence: persistence));
+  } catch (error, stackTrace) {
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: error,
+        stack: stackTrace,
+        library: 'Paperwork Assistant startup',
+        context: ErrorDescription(
+          'while initializing encrypted local persistence',
+        ),
+      ),
+    );
+    runApp(const PaperworkAssistantStartupErrorApp());
+  }
 }
 
 class PaperworkAssistantApp extends StatelessWidget {
-  const PaperworkAssistantApp({super.key, this.locale});
+  const PaperworkAssistantApp({super.key, this.locale, this.persistence});
 
   final Locale? locale;
+  final AppPersistence? persistence;
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      onGenerateTitle: (context) => AppStrings.of(context).appName,
-      locale: locale,
-      supportedLocales: const [Locale('en'), Locale('de')],
-      localizationsDelegates: const [
-        AppStrings.delegate,
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      localeResolutionCallback: (deviceLocale, supportedLocales) {
-        if (deviceLocale?.languageCode == 'de') {
-          return const Locale('de');
-        }
-        return const Locale('en');
-      },
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF315B7D)),
-        useMaterial3: true,
+    return _PersistenceLifecycle(
+      persistence: persistence,
+      child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        onGenerateTitle: (context) => AppStrings.of(context).appName,
+        locale: locale,
+        supportedLocales: const [Locale('en'), Locale('de')],
+        localizationsDelegates: const [
+          AppStrings.delegate,
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        localeResolutionCallback: (deviceLocale, supportedLocales) {
+          if (deviceLocale?.languageCode == 'de') {
+            return const Locale('de');
+          }
+          return const Locale('en');
+        },
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF315B7D)),
+          useMaterial3: true,
+        ),
+        home: const DocumentInboxScreen(),
       ),
-      home: const DocumentInboxScreen(),
     );
   }
+}
+
+class PaperworkAssistantStartupErrorApp extends StatelessWidget {
+  const PaperworkAssistantStartupErrorApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text(
+                'Local data could not be loaded. Please restart the app.',
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PersistenceLifecycle extends StatefulWidget {
+  const _PersistenceLifecycle({required this.persistence, required this.child});
+
+  final AppPersistence? persistence;
+  final Widget child;
+
+  @override
+  State<_PersistenceLifecycle> createState() => _PersistenceLifecycleState();
+}
+
+class _PersistenceLifecycleState extends State<_PersistenceLifecycle> {
+  @override
+  void dispose() {
+    final persistence = widget.persistence;
+    if (persistence != null) {
+      unawaited(persistence.close());
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 class DocumentInboxScreen extends StatelessWidget {
