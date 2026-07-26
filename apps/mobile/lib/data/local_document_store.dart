@@ -32,10 +32,20 @@ final class LocalDocumentStore {
 
     try {
       await _database.insertPage(page);
+      try {
+        await _fileStore.markCommitted(encryptedFileName);
+      } catch (_) {
+        // The pending marker is safe to retain: startup reconciliation checks
+        // the committed database row before removing it.
+      }
       return page;
-    } catch (_) {
-      await _fileStore.delete(encryptedFileName);
-      rethrow;
+    } catch (error, stackTrace) {
+      try {
+        await _fileStore.delete(encryptedFileName);
+      } catch (_) {
+        // The pending marker remains durable for startup reconciliation.
+      }
+      Error.throwWithStackTrace(error, stackTrace);
     }
   }
 

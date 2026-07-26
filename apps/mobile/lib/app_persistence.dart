@@ -47,6 +47,12 @@ final class AppPersistence {
       keyManager: keyManager,
       backupExclusion: backupExclusion,
     );
+    try {
+      await fileStore.reconcilePendingFiles(database.isEncryptedFileReferenced);
+    } catch (_) {
+      await database.close();
+      rethrow;
+    }
 
     return AppPersistence._(
       database: database,

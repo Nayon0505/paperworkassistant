@@ -339,6 +339,20 @@ final class AppDatabase extends GeneratedDatabase {
         .toList(growable: false);
   }
 
+  Future<bool> isEncryptedFileReferenced(String encryptedFileName) async {
+    final row = await customSelect(
+      '''
+        SELECT EXISTS(
+          SELECT 1
+          FROM pages
+          WHERE encrypted_file_name = ?
+        ) AS is_referenced
+      ''',
+      variables: [Variable<String>(encryptedFileName)],
+    ).getSingle();
+    return row.read<int>('is_referenced') == 1;
+  }
+
   Future<void> updateDocumentStatus(
     String id,
     String status, {

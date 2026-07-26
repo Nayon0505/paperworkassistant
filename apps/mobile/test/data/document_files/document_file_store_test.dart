@@ -100,4 +100,74 @@ void main() {
 
     expect(await plaintext.exists(), isFalse);
   });
+
+  test('attempts plaintext cleanup when work-file cleanup fails', () async {
+    final plaintext = File('${temporaryDirectory.path}/import.tmp');
+    await plaintext.writeAsString('must disappear');
+    final token = CancellationToken();
+    final attemptedCleanup = <String>[];
+    final failingCleanupStore = DocumentFileStore(
+      rootDirectory: Directory('${temporaryDirectory.path}/documents'),
+      keyManager: InstallationKeyManager(
+        MemorySecureValueStore(),
+        random: Random(4),
+      ),
+      backupExclusion: const NoopBackupExclusion(),
+      writeWorkFile: (file, bytes) async {
+        await file.writeAsBytes(bytes, flush: true);
+        token.cancel();
+      },
+      deleteTemporaryFile: (file) async {
+        attemptedCleanup.add(file.path);
+        if (file.path.endsWith('.work')) {
+          throw FileSystemException(
+            'simulated work cleanup failure',
+            file.path,
+          );
+        }
+        await file.delete();
+      },
+    );
+
+    await expectLater(
+      failingCleanupStore.storeFromPlaintextFile(
+        plaintext,
+        pageId: 'page-1',
+        cancellationToken: token,
+      ),
+      throwsA(isA<OperationCancelledException>()),
+    );
+
+    expect(attemptedCleanup, hasLength(2));
+    expect(attemptedCleanup.first, endsWith('.work'));
+    expect(attemptedCleanup.last, plaintext.path);
+    expect(await plaintext.exists(), isFalse);
+    final documentsDirectory = Directory(
+      '${temporaryDirectory.path}/documents',
+    );
+    expect(
+      documentsDirectory.listSync().whereType<File>().where(
+        (file) => file.path.endsWith('.work'),
+      ),
+      hasLength(1),
+    );
+    expect(
+      documentsDirectory.listSync().whereType<File>().where(
+        (file) => file.path.endsWith('.pwa.pending'),
+      ),
+      hasLength(1),
+    );
+
+    final recoveryStore = DocumentFileStore(
+      rootDirectory: documentsDirectory,
+      keyManager: InstallationKeyManager(
+        MemorySecureValueStore(),
+        random: Random(4),
+      ),
+      backupExclusion: const NoopBackupExclusion(),
+    );
+    await recoveryStore.reconcilePendingFiles((_) async => false);
+
+    expect(documentsDirectory.listSync(), isEmpty);
+  });
 }

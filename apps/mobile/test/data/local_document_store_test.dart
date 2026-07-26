@@ -85,6 +85,123 @@ void main() {
   });
 
   test(
+    'failed rollback remains journaled and preserves the database error',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'paperwork-page-rollback-',
+      );
+      addTearDown(() async {
+        if (await directory.exists()) {
+          await directory.delete(recursive: true);
+        }
+      });
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      await database.initialize();
+      final secureStore = MemorySecureValueStore();
+      final keyManager = InstallationKeyManager(
+        secureStore,
+        random: Random(12),
+      );
+      final documentsDirectory = Directory('${directory.path}/documents');
+      var failStoredFileDeletion = false;
+      final fileStore = DocumentFileStore(
+        rootDirectory: documentsDirectory,
+        keyManager: keyManager,
+        backupExclusion: const NoopBackupExclusion(),
+        random: Random(13),
+        deleteFile: (file) async {
+          if (failStoredFileDeletion) {
+            throw FileSystemException(
+              'simulated rollback delete failure',
+              file.path,
+            );
+          }
+          await file.delete();
+        },
+      );
+      final store = LocalDocumentStore(
+        database: database,
+        fileStore: fileStore,
+      );
+      final createdAt = DateTime.utc(2026, 7, 26);
+      await database.insertDocument(
+        DocumentRecord(
+          id: 'document-1',
+          sourceName: 'letter.pdf',
+          status: 'imported',
+          recordVersion: 1,
+          createdAt: createdAt,
+          updatedAt: createdAt,
+        ),
+      );
+      final originalImport = File('${directory.path}/original.tmp');
+      await originalImport.writeAsString('committed original');
+      final originalPage = await store.addPageFromTemporaryFile(
+        documentId: 'document-1',
+        pageId: 'page-1',
+        pageNumber: 0,
+        mimeType: 'application/pdf',
+        plaintextFile: originalImport,
+      );
+      failStoredFileDeletion = true;
+      final duplicateImport = File('${directory.path}/duplicate.tmp');
+      await duplicateImport.writeAsString('abandoned replacement');
+
+      await expectLater(
+        store.addPageFromTemporaryFile(
+          documentId: 'document-1',
+          pageId: 'page-1',
+          pageNumber: 1,
+          mimeType: 'application/pdf',
+          plaintextFile: duplicateImport,
+        ),
+        throwsA(isNot(isA<FileSystemException>())),
+      );
+
+      expect(await database.rowCount('pages'), 1);
+      expect(
+        documentsDirectory.listSync().whereType<File>().where(
+          (file) => file.path.endsWith('.pwa'),
+        ),
+        hasLength(2),
+      );
+      expect(
+        documentsDirectory.listSync().whereType<File>().where(
+          (file) => file.path.endsWith('.pwa.pending'),
+        ),
+        hasLength(1),
+      );
+
+      final recoveryStore = DocumentFileStore(
+        rootDirectory: documentsDirectory,
+        keyManager: keyManager,
+        backupExclusion: const NoopBackupExclusion(),
+      );
+      await recoveryStore.reconcilePendingFiles(
+        database.isEncryptedFileReferenced,
+      );
+
+      expect(
+        utf8.decode(await recoveryStore.read(originalPage.encryptedFileName)),
+        'committed original',
+      );
+      expect(
+        documentsDirectory.listSync().whereType<File>().where(
+          (file) => file.path.endsWith('.pwa'),
+        ),
+        hasLength(1),
+      );
+      expect(
+        documentsDirectory.listSync().whereType<File>().where(
+          (file) => file.path.endsWith('.pending'),
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
     'document deletion removes related rows and encrypted originals',
     () async {
       final directory = await Directory.systemTemp.createTemp(

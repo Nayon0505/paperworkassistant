@@ -34,9 +34,13 @@ final class DocumentFileStore {
     AuthenticatedFileCipher? cipher,
     this._backupExclusion = const PlatformBackupExclusion(),
     Future<void> Function(File file)? deleteFile,
+    Future<void> Function(File file)? deleteTemporaryFile,
+    Future<void> Function(File file, Uint8List bytes)? writeWorkFile,
     Random? random,
   }) : _cipher = cipher ?? AesGcmFileCipher(),
        _deleteFile = deleteFile ?? _deleteStoredFile,
+       _deleteTemporaryFile = deleteTemporaryFile ?? _deleteStoredFile,
+       _writeWorkFile = writeWorkFile ?? _writeStoredFile,
        _random = random ?? Random.secure();
 
   final Directory _rootDirectory;
@@ -44,6 +48,8 @@ final class DocumentFileStore {
   final AuthenticatedFileCipher _cipher;
   final BackupExclusion _backupExclusion;
   final Future<void> Function(File file) _deleteFile;
+  final Future<void> Function(File file) _deleteTemporaryFile;
+  final Future<void> Function(File file, Uint8List bytes) _writeWorkFile;
   final Random _random;
 
   Future<String> storeFromPlaintextFile(
@@ -53,6 +59,9 @@ final class DocumentFileStore {
   }) async {
     final token = cancellationToken ?? CancellationToken();
     File? workFile;
+    Object? operationError;
+    StackTrace? operationStackTrace;
+    String? encryptedFileName;
 
     try {
       token.throwIfCancelled();
@@ -66,22 +75,36 @@ final class DocumentFileStore {
       await _ensureRoot();
       final safePageId = _safeFileComponent(pageId);
       final target = await _allocateTarget(safePageId);
+      final pendingMarker = _pendingMarker(target);
+      await pendingMarker.writeAsString('', flush: true);
+      await _backupExclusion.protect(pendingMarker.path);
       workFile = File('${target.path}.work');
-      await workFile.writeAsBytes(encrypted, flush: true);
+      await _writeWorkFile(workFile, encrypted);
       token.throwIfCancelled();
 
       await workFile.rename(target.path);
       workFile = null;
       await _backupExclusion.protect(target.path);
-      return p.basename(target.path);
-    } finally {
-      if (workFile != null && await workFile.exists()) {
-        await workFile.delete();
-      }
-      if (await plaintextFile.exists()) {
-        await plaintextFile.delete();
-      }
+      encryptedFileName = p.basename(target.path);
+    } catch (error, stackTrace) {
+      operationError = error;
+      operationStackTrace = stackTrace;
     }
+
+    final cleanupFailure = await _cleanupTemporaryFiles(
+      workFile,
+      plaintextFile,
+    );
+    if (operationError != null) {
+      Error.throwWithStackTrace(operationError, operationStackTrace!);
+    }
+    if (cleanupFailure != null) {
+      Error.throwWithStackTrace(
+        cleanupFailure.error,
+        cleanupFailure.stackTrace,
+      );
+    }
+    return encryptedFileName!;
   }
 
   Future<Uint8List> read(String encryptedFileName) async {
@@ -96,9 +119,81 @@ final class DocumentFileStore {
     if (await file.exists()) {
       await _deleteFile(file);
     }
+    final pendingMarker = _pendingMarker(file);
+    if (await pendingMarker.exists()) {
+      await pendingMarker.delete();
+    }
   }
 
   File encryptedFile(String encryptedFileName) => _resolve(encryptedFileName);
+
+  Future<void> markCommitted(String encryptedFileName) async {
+    final pendingMarker = _pendingMarker(_resolve(encryptedFileName));
+    if (await pendingMarker.exists()) {
+      await pendingMarker.delete();
+    }
+  }
+
+  Future<void> reconcilePendingFiles(
+    Future<bool> Function(String encryptedFileName) isReferenced,
+  ) async {
+    if (!await _rootDirectory.exists()) {
+      return;
+    }
+
+    Object? firstFailure;
+    StackTrace? firstFailureStackTrace;
+    final pendingMarkers = await _rootDirectory
+        .list()
+        .where(
+          (entity) =>
+              entity is File &&
+              p.basename(entity.path).endsWith('.pwa.pending'),
+        )
+        .cast<File>()
+        .toList();
+    for (final pendingMarker in pendingMarkers) {
+      try {
+        final encryptedFileName = p.basename(
+          pendingMarker.path.substring(
+            0,
+            pendingMarker.path.length - '.pending'.length,
+          ),
+        );
+        final target = _resolve(encryptedFileName);
+        if (await isReferenced(encryptedFileName)) {
+          await pendingMarker.delete();
+          continue;
+        }
+
+        Object? cleanupError;
+        StackTrace? cleanupStackTrace;
+        for (final entry in <(File, Future<void> Function(File))>[
+          (target, _deleteFile),
+          (File('${target.path}.work'), _deleteTemporaryFile),
+        ]) {
+          try {
+            if (await entry.$1.exists()) {
+              await entry.$2(entry.$1);
+            }
+          } catch (error, stackTrace) {
+            cleanupError ??= error;
+            cleanupStackTrace ??= stackTrace;
+          }
+        }
+        if (cleanupError != null) {
+          Error.throwWithStackTrace(cleanupError, cleanupStackTrace!);
+        }
+        await pendingMarker.delete();
+      } catch (error, stackTrace) {
+        firstFailure ??= error;
+        firstFailureStackTrace ??= stackTrace;
+      }
+    }
+    if (firstFailure != null) {
+      Error.throwWithStackTrace(firstFailure, firstFailureStackTrace!);
+    }
+  }
 
   Future<void> _ensureRoot() async {
     await _rootDirectory.create(recursive: true);
@@ -115,7 +210,8 @@ final class DocumentFileStore {
         p.join(_rootDirectory.path, '$safePageId-$suffix.pwa'),
       );
       if (!await target.exists() &&
-          !await File('${target.path}.work').exists()) {
+          !await File('${target.path}.work').exists() &&
+          !await _pendingMarker(target).exists()) {
         return target;
       }
     }
@@ -134,6 +230,29 @@ final class DocumentFileStore {
     return File(p.join(_rootDirectory.path, baseName));
   }
 
+  File _pendingMarker(File encryptedFile) =>
+      File('${encryptedFile.path}.pending');
+
+  Future<_CapturedFailure?> _cleanupTemporaryFiles(
+    File? workFile,
+    File plaintextFile,
+  ) async {
+    _CapturedFailure? firstFailure;
+    for (final file in <File?>[workFile, plaintextFile]) {
+      if (file == null) {
+        continue;
+      }
+      try {
+        if (await file.exists()) {
+          await _deleteTemporaryFile(file);
+        }
+      } catch (error, stackTrace) {
+        firstFailure ??= _CapturedFailure(error, stackTrace);
+      }
+    }
+    return firstFailure;
+  }
+
   String _safeFileComponent(String value) {
     if (value.isEmpty || !RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(value)) {
       throw ArgumentError.value(
@@ -147,3 +266,14 @@ final class DocumentFileStore {
 }
 
 Future<void> _deleteStoredFile(File file) => file.delete();
+
+Future<void> _writeStoredFile(File file, Uint8List bytes) async {
+  await file.writeAsBytes(bytes, flush: true);
+}
+
+final class _CapturedFailure {
+  const _CapturedFailure(this.error, this.stackTrace);
+
+  final Object error;
+  final StackTrace stackTrace;
+}
