@@ -7,10 +7,16 @@ environment:
   sdk: ^3.12.2
 
 dependencies:
+  cryptography: ^2.9.0
+  drift: ^2.34.2
   flutter:
     sdk: flutter
   flutter_localizations:
     sdk: flutter
+  flutter_secure_storage: ^10.3.1
+  path: ^1.9.1
+  path_provider: ^2.1.6
+  sqlite3: ^3.5.0
 
 dev_dependencies:
   flutter_test:
@@ -19,3 +25,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+hooks:
+  user_defines:
+    sqlite3:
+      source: sqlite3mc
