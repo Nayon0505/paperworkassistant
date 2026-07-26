@@ -58,21 +58,24 @@ async function repository() {
 
 const trustedReviewerAssociations = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
-function approvedReviewFromComment(comment, reviewerLogin) {
+function reviewFromComment(comment, reviewerLogin) {
   if (!reviewerLogin ||
       comment.user?.login?.toLowerCase() !== reviewerLogin.toLowerCase() ||
       !trustedReviewerAssociations.has(comment.author_association)) return null;
   const [firstLine] = (comment.body ?? "").split(/\r?\n/, 1);
   const match = firstLine.match(/^Finn-loop review of ([0-9a-f]{40})$/i);
+  if (!match) return null;
   const approved = /^## 3\. Safe to merge[ \t]*\r?$(?:\r?\n)+[ \t]*Yes\b/im
     .test(comment.body ?? "");
-  return match && approved ? { sha: match[1], url: comment.html_url } : null;
+  return { sha: match[1], url: comment.html_url, approved };
 }
 
 export function findLatestApprovedReview(comments, reviewerLogin) {
-  return [...comments].reverse()
-    .map((comment) => approvedReviewFromComment(comment, reviewerLogin))
+  const latestReview = [...comments].reverse()
+    .map((comment) => reviewFromComment(comment, reviewerLogin))
     .find(Boolean);
+  if (!latestReview?.approved) return undefined;
+  return { sha: latestReview.sha, url: latestReview.url };
 }
 
 async function latestReview(ownerRepo, number, reviewerLogin) {

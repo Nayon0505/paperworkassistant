@@ -72,3 +72,28 @@ No — a must-fix finding remains.
 
   assert.equal(findLatestApprovedReview(comments, "trusted-reviewer"), undefined);
 });
+
+test("a newer trusted rejection supersedes an approval for the same SHA", () => {
+  const sha = "d".repeat(40);
+  const comments = [
+    {
+      body: approvedBody(sha),
+      html_url: "https://example.test/trusted-approval",
+      author_association: "OWNER",
+      user: { login: "trusted-reviewer" },
+    },
+    {
+      body: `Finn-loop review of ${sha}
+
+## 3. Safe to merge
+
+No — a must-fix finding remains.
+`,
+      html_url: "https://example.test/trusted-rejection",
+      author_association: "OWNER",
+      user: { login: "trusted-reviewer" },
+    },
+  ];
+
+  assert.equal(findLatestApprovedReview(comments, "trusted-reviewer"), undefined);
+});
