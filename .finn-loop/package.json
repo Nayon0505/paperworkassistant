@@ -1,0 +1,8 @@
+{
+  "name": "finn-loop-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@slack/bolt": "4.4.0"
+  }
+}
