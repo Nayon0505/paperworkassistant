@@ -1,9 +1,9 @@
-﻿{
-    "linearTeamKey":  "NAY",
-    "startedState":  "In Progress",
-    "labels":  {
-                   "blocked":  "blocked",
-                   "ready":  "agent-ready"
-               },
-    "reviewState":  "In Review"
+{
+  "linearTeamKey": "NAY",
+  "startedState": "In Progress",
+  "reviewState": "In Review",
+  "labels": {
+    "ready": "agent-ready",
+    "blocked": "blocked"
+  }
 }

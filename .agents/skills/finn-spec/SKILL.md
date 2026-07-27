@@ -1,6 +1,6 @@
 ---
 name: finn-spec
-description: Interview the user about a raw idea, research the repository, and create a build-ready Linear issue after explicit confirmation. Use for Finn-loop specification, feature planning, or drafting an approved issue. Interactive only; never apply agent-ready.
+description: Interview the user about a raw or greenfield product idea and create a build-ready Linear issue after explicit confirmation. Use for initial product specification, feature planning, or drafting an approved issue. Interactive only; never apply agent-ready.
 ---
 
 # Finn specification
@@ -14,6 +14,9 @@ implement with the same observable behavior.
 - Confirm the configured Linear team and intended GitHub repository.
 - Research relevant code before asking questions. Do not ask what the repository
   can answer.
+- If the repository contains no application code, treat it as greenfield. Do
+  not choose a framework or architecture until the interview establishes the
+  product requirements that affect that choice.
 
 ## Interview
 
