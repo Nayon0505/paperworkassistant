@@ -12,17 +12,15 @@ class LandingPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.white,
-      body: SelectionArea(
-        child: SingleChildScrollView(
-          child: Column(
-            children: const [
-              _LandingHeader(),
-              _HeroSection(),
-              _HowItWorksSection(),
-              _TrustSection(),
-              _LandingFooter(),
-            ],
-          ),
+      body: SingleChildScrollView(
+        child: Column(
+          children: const [
+            _LandingHeader(),
+            _HeroSection(),
+            _HowItWorksSection(),
+            _TrustSection(),
+            _LandingFooter(),
+          ],
         ),
       ),
     );
@@ -42,7 +40,7 @@ class _LandingHeader extends StatelessWidget {
             final showLinks = constraints.maxWidth >= 760;
             return Row(
               children: [
-                const BrandMark(),
+                BrandMark(showWordmark: constraints.maxWidth >= 500),
                 const Spacer(),
                 if (showLinks) ...[
                   TextButton(
@@ -553,12 +551,12 @@ class _LandingFooter extends StatelessWidget {
     return const _PageWidth(
       child: Padding(
         padding: EdgeInsets.symmetric(vertical: AppSpacing.xl),
-        child: Row(
-          children: [
-            BrandMark(),
-            Spacer(),
-            Text('Produktgerüst · Keine Beratung'),
-          ],
+        child: Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: AppSpacing.xl,
+          runSpacing: AppSpacing.md,
+          children: [BrandMark(), Text('Produktgerüst · Keine Beratung')],
         ),
       ),
     );
